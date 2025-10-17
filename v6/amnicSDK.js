@@ -1,19 +1,15 @@
 (function () {
 
-  // ---------- xClientId (no external lib needed) ----------
+  // --------- Stable x_client_id (no external lib) ----------
   const getUniqueKey = () => {
     if (globalThis.crypto?.randomUUID) return crypto.randomUUID();
-    const rnds = (len) => {
-      const a = new Uint8Array(len);
-      (globalThis.crypto && crypto.getRandomValues) ? crypto.getRandomValues(a) : a.fill(Math.random() * 256);
-      return [...a];
-    };
-    const bytes = rnds(16);
-    bytes[6] = (bytes[6] & 0x0f) | 0x40; // v4
-    bytes[8] = (bytes[8] & 0x3f) | 0x80; // variant
-    const toHex = (n) => n.toString(16).padStart(2, "0");
-    const hex = bytes.map(toHex).join("");
-    return `${hex.slice(0,8)}-${hex.slice(8,12)}-${hex.slice(12,16)}-${hex.slice(16,20)}-${hex.slice(20)}`;
+    const a = new Uint8Array(16);
+    if (globalThis.crypto?.getRandomValues) crypto.getRandomValues(a);
+    else for (let i = 0; i < a.length; i++) a[i] = Math.floor(Math.random() * 256);
+    a[6] = (a[6] & 0x0f) | 0x40; // v4
+    a[8] = (a[8] & 0x3f) | 0x80; // variant
+    const h = [...a].map(n => n.toString(16).padStart(2, "0")).join("");
+    return `${h.slice(0,8)}-${h.slice(8,12)}-${h.slice(12,16)}-${h.slice(16,20)}-${h.slice(20)}`;
   };
 
   let xClientId = localStorage.getItem("x_client_id");
@@ -21,20 +17,23 @@
     xClientId = getUniqueKey();
     localStorage.setItem("x_client_id", xClientId);
   }
-  console.log("✅ xClientId ready:", xClientId);
-  window.xClientId = xClientId; // optional: for debugging
+  window.xClientId = xClientId; // optional debug
+  console.log("✅ xClientId:", xClientId);
 
-  // ------------------ SETTINGS (edit if needed) ------------------
+  // ------------------ SETTINGS ------------------
   const cfg = {
     linkedInClientId: "869u3mo71y1bpm",
     redirectUri: "https://gamedev1997.github.io/costSmasherH5/v6",
     scope: "openid profile email",
 
-    apiBase: "https://api.cloudcostsmashers.com",
-    xClientIdHeader: "x_client_id",
-    xClientIdValue: xClientId, // use generated xClientId
+    // ⚠️ Pick ONE apiBase and keep it consistent (UAT OR PROD)
+    apiBase: "https://cost-smashers.uat.amnic.com",
+    // apiBase: "https://api.cloudcostsmashers.com",
 
-    storageKey: "auth_token", // where we store the API auth key
+    xClientIdHeader: "x_client_id",
+    xClientIdValue: xClientId,
+
+    storageKey: "auth_token",
     c3: {
       status: "OnLoginStatus",
       success: "OnLoginSuccess",
@@ -51,93 +50,80 @@
   let gameId = "";
   let myPlayerId = "";
 
-  // ------------------ SMALL HELPERS ------------------
+  // ------------------ HELPERS ------------------
   const isMobile = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
 
   const log = (...a) => {
     console.log("[App]", ...a);
     const combined = a.map(d => (typeof d === "object" ? JSON.stringify(d) : String(d))).join(" ");
-    console.log("combine..", combined);
-
-    if (combined.toLowerCase().includes("leaderboard")) {
-      c3_callFunction("LBdataCreate");
+    if (combined.toLowerCase().includes("leaderboard")) { try { c3_callFunction("LBdataCreate"); } catch {} }
+    if (combined.toLowerCase().includes("login success") || combined.toLowerCase().includes("session valid")) {
+      try { c3_callFunction("loggedIn"); } catch {}
     }
-
-    if (
-      combined.toLowerCase().includes("login success") ||
-      combined.toLowerCase().includes("session valid")
-    ) {
-      console.log("combine..Login...", myPlayerId);
-      c3_callFunction("loggedIn");
-    }
-
-    try { if (typeof c3_callFunction === "function") {} } catch {}
   };
 
   const callC3 = (fn, ...args) => { try { globalThis.runtime?.callFunction?.(fn, ...args); } catch {} };
 
   function authHeaders() {
     if (!token) token = localStorage.getItem(cfg.storageKey) || "";
-    const h = { [cfg.xClientIdHeader]: cfg.xClientIdValue };
+    const h = { [cfg.xClientIdHeader]: cfg.xClientIdValue || xClientId || "" };
     if (token) h.Authorization = token;
     return h;
   }
 
+  // --------- CORS-friendly HTTP wrapper (frontend-only) ----------
   async function http(url, { method = "GET", headers = {}, body } = {}) {
-    const all = { ...headers };
-    if (body && !all["Content-Type"]) all["Content-Type"] = "application/json";
-    const res = await fetch(url, { method, headers: all, body: body ? JSON.stringify(body) : undefined });
-    const text = await res.text(); let json = null; try { json = text ? JSON.parse(text) : null; } catch {}
+    const base = {
+      "Content-Type": "application/json",
+      [cfg.xClientIdHeader]: cfg.xClientIdValue || xClientId || ""
+    };
+    if (token) base.Authorization = token;
+
+    const res = await fetch(url, {
+      method,
+      headers: { ...base, ...headers },
+      body: body ? JSON.stringify(body) : undefined,
+      mode: "cors",
+      cache: "no-store",
+      redirect: "follow",
+      // credentials: "include", // <- ONLY if backend enables credentials CORS
+      referrerPolicy: "no-referrer"
+    });
+
+    const text = await res.text();
+    let json = null; try { json = text ? JSON.parse(text) : null; } catch {}
     log(method, url, res.status, json || text || "");
     return { ok: res.ok, status: res.status, json, text };
   }
 
   function clearQuery(){ try{ history.replaceState({}, "", location.pathname); }catch{} }
 
-  // ---------- helpers to handle revoked-token flow ----------
+  // --------- Revoked-token helpers ----------
   function resetAuth(reason) {
     try { localStorage.removeItem(cfg.storageKey); } catch {}
     token = "";
     try { sessionStorage.removeItem("li_state"); } catch {}
     console.warn("🔁 resetAuth:", reason || "");
   }
-
-  // detect LinkedIn revoked/65601 patterns coming via backend
   function isRevokedLinkedIn(res) {
     const t = ((res && (res.text || "")) + " " + JSON.stringify(res?.json || {})).toUpperCase();
     return t.includes("REVOKED_ACCESS_TOKEN") || t.includes('"SERVICEERRORCODE":65601') || t.includes("65601");
   }
 
-  // ---------- SINGLE-FLIGHT GUARDS TO PREVENT DOUBLE EXCHANGE ----------
+  // --------- Single-flight guard (prevent double /v1/login) ----------
   const CODE_LOCK_KEY = "li_code_lock";
   let exchanging = false;
-
   async function safeExchangeOnce(code) {
-    // Already exchanging in this runtime?
-    if (exchanging) {
-      log("⏳ exchange skipped (in-flight)");
-      return false;
-    }
-    // Was this code already exchanged in this tab/session?
+    if (exchanging) { log("⏳ exchange skipped (in-flight)"); return false; }
     const locked = sessionStorage.getItem(CODE_LOCK_KEY);
-    if (locked && locked === code) {
-      log("🛑 exchange skipped (code already used in this session)");
-      return false;
-    }
-
-    // Lock for this code
+    if (locked && locked === code) { log("🛑 exchange skipped (code already used)"); return false; }
     try { sessionStorage.setItem(CODE_LOCK_KEY, code); } catch {}
     exchanging = true;
-    try {
-      const ok = await exchangeCode(code);
-      return ok;
-    } finally {
-      // keep the lock (so refresh on same redirect URL won’t retry)
-      exchanging = false;
-    }
+    try { return await exchangeCode(code); }
+    finally { exchanging = false; /* keep lock to prevent refresh repeat */ }
   }
 
-  // ------------------ MOBILE/FULL-PAGE CALLBACK HANDLER (auto) ------------------
+  // ------------------ MOBILE/FULL-PAGE CALLBACK HANDLER ------------------
   async function handleRedirectIfPresent() {
     const qs = new URLSearchParams(location.search);
     const code = qs.get("code");
@@ -150,14 +136,13 @@
     const saved = sessionStorage.getItem("li_state");
     if (saved && back !== saved) { clearQuery(); callC3(cfg.c3.error, "state_mismatch"); return; }
 
-    // ✅ use single-flight wrapper
     const ok = await safeExchangeOnce(code);
     clearQuery();
     if (ok) { callC3(cfg.c3.success); callC3(cfg.c3.status, "logged_in"); }
     else    { callC3(cfg.c3.error, "login_failed"); }
   }
 
-  // ------------------ 1) LOGIN (POPUP on desktop, REDIRECT on mobile) ------------------
+  // ------------------ 1) LOGIN ------------------
   window.loginWithLinkedIn = function (force) {
     const state = Math.random().toString(36).slice(2);
     sessionStorage.setItem("li_state", state);
@@ -169,18 +154,13 @@
       + "&scope=" + encodeURIComponent(cfg.scope)
       + "&state=" + encodeURIComponent(state);
 
-    if (force) {
-      // force new login/consent screen so LinkedIn gives a fresh grant
-      url += "&prompt=login";
-    }
+    if (force) url += "&prompt=login";
 
     if (isMobile) {
-      // ✅ iOS/Android: full-page redirect (reliable)
       window.location.assign(url);
       return;
     }
 
-    // 🖥️ Desktop: popup
     const w = 600, h = 700, left = (screen.width - w) / 2, top = (screen.height - h) / 2;
     const pop = window.open(url, "linkedin_popup",
       `width=${w},height=${h},left=${left},top=${top},resizable=yes,scrollbars=yes`);
@@ -189,7 +169,7 @@
     const timer = setInterval(async () => {
       try {
         if (!pop || pop.closed) { clearInterval(timer); return; }
-        const href = pop.location.href; // throws until redirectUri reached
+        const href = pop.location.href; // throws until same-origin
         if (href.startsWith(cfg.redirectUri) && href.includes("?code=")) {
           clearInterval(timer);
           const sp = new URL(href).searchParams;
@@ -197,15 +177,13 @@
           const backState = sp.get("state");
           const saved = sessionStorage.getItem("li_state");
           if (saved && backState !== saved) { pop.close(); callC3(cfg.c3.error, "state_mismatch"); return; }
-
           try { pop.document.body.innerHTML = "<p style='font:14px sans-serif;padding:16px'>Logging you in…</p>"; } catch {}
-          // ✅ single-flight wrapper prevents double-hit with redirect handler
           const ok = await safeExchangeOnce(code);
           pop.close();
           if (ok) { log("✅ Login success"); callC3(cfg.c3.success); callC3(cfg.c3.status, "logged_in"); }
           else    { log("❌ Login failed");  callC3(cfg.c3.error, "login_failed"); }
         }
-      } catch { /* ignore until same-origin */ }
+      } catch {}
     }, 400);
   };
 
@@ -213,16 +191,13 @@
   async function exchangeCode(code) {
     const r = await http(`${cfg.apiBase}/v1/login`, {
       method: "POST",
-      headers: { [cfg.xClientIdHeader]: cfg.xClientIdValue, "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", [cfg.xClientIdHeader]: cfg.xClientIdValue },
       body: { authorization_code: code, redirect_uri: cfg.redirectUri }
     });
 
-    // 👇 Handle revoked token coming back from backend/LinkedIn
     if (!r.ok) {
       if (isRevokedLinkedIn(r)) {
-        console.warn("♻️ LinkedIn grant revoked → clearing and forcing fresh OAuth");
         resetAuth("revoked_token");
-        // IMPORTANT: DO NOT retry same code; trigger a new auth round
         setTimeout(() => window.loginWithLinkedIn(true), 100);
       }
       return false;
@@ -233,26 +208,21 @@
     try { localStorage.setItem(cfg.storageKey, token); } catch {}
     log("🔐 token saved");
     myPlayerId = r.json.player_id;
-    console.log("PlayerInfo..", myPlayerId);
-    c3_callFunction("setPlayerId", [myPlayerId]);
-
+    try { c3_callFunction("setPlayerId", [myPlayerId]); } catch {}
     return true;
   }
 
-  // ------------------ 3) SESSION CHECK (call on refresh) ------------------
+  // ------------------ 3) SESSION CHECK ------------------
   async function checkLogin() {
     token = localStorage.getItem(cfg.storageKey) || "";
     if (!token) { callC3(cfg.c3.status, "logged_out"); return false; }
     const r = await http(`${cfg.apiBase}/v1/player`, { headers: authHeaders() });
     if (r.ok) {
       log("👤 session valid"); callC3(cfg.c3.status, "logged_in");
-      console.log("token...", cfg.storageKey);
       myPlayerId = r.json.player_id;
-      console.log("PlayerInfo..", myPlayerId);
-      c3_callFunction("setPlayerId", [myPlayerId]);
-      return true; 
+      try { c3_callFunction("setPlayerId", [myPlayerId]); } catch {}
+      return true;
     }
-    // token invalid → clear
     try { localStorage.removeItem(cfg.storageKey); } catch {}
     token = "";
     log("🔓 session invalid → logged_out");
@@ -297,12 +267,7 @@
       const url = `${cfg.apiBase}/v1/leaderboard?period=${encodeURIComponent(period)}`;
       const res = await http(url, { headers: authHeaders() });
 
-      console.log("↩️ raw response:", res);
-
-      if (!res?.ok) {
-        callC3(cfg.c3.error, "leaderboard_failed", res?.text || "");
-        return;
-      }
+      if (!res?.ok) { callC3(cfg.c3.error, "leaderboard_failed", res?.text || ""); return; }
 
       const data =
         Array.isArray(res?.json) ? res.json :
@@ -312,12 +277,10 @@
 
       console.log(`✅ leaderboard[${period}]`, data);
 
-      for (const player of data) {
-        const { player_id, display_name, avatar, score, rank } = player;
-        console.log(`👤 ${display_name} | Score: ${score} | Rank: ${rank} | ID: ${player_id} | Avatar: ${avatar}`);
-        c3_callFunction("LBData",[display_name,player_id,avatar,rank,score]);
+      for (const p of data) {
+        const { player_id, display_name, avatar, score, rank } = p;
+        try { c3_callFunction("LBData",[display_name,player_id,avatar,rank,score]); } catch {}
       }
-
       callC3(cfg.c3.leaderboard, JSON.stringify(data));
     } catch (err) {
       console.error("❌ leaderboard error:", err);
@@ -325,12 +288,11 @@
     }
   };
 
-  // ------------------ 5) AUTO: handle mobile/full-page redirect (iOS/Android) ------------------
+  // ------------------ 5) AUTO: handle redirect (iOS/Android) ------------------
   (async function init() {
-    await handleRedirectIfPresent(); // will no-op on desktop normal loads
-    // optional: also check existing session on load
-    // await checkLogin();
+    await handleRedirectIfPresent(); // no-op on normal loads
+    // optionally also: await checkLogin();
   })();
 
 })();
-// V6_1:07AM
+// --------- END OF amnicSDK.js ----------
