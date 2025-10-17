@@ -30,7 +30,7 @@
     redirectUri: "https://gamedev1997.github.io/costSmasherH5/v6",
     scope: "openid profile email",
 
-    apiBase: "https://cost-smashers.uat.amnic.com",
+    apiBase: "https://api.cloudcostsmashers.com",
     xClientIdHeader: "x_client_id",
     xClientIdValue: xClientId, // use generated xClientId
 
