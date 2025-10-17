@@ -22,8 +22,7 @@
     localStorage.setItem("x_client_id", xClientId);
   }
   console.log("✅ xClientId ready:", xClientId);
-  try { cfg.xClientIdValue = xClientId; } catch {}
-  window.xClientId = xClientId; // debug
+  window.xClientId = xClientId; // optional: for debugging
 
   // ------------------ SETTINGS (edit if needed) ------------------
   const cfg = {
@@ -33,9 +32,9 @@
 
     apiBase: "https://cost-smashers.uat.amnic.com",
     xClientIdHeader: "x_client_id",
-    xClientIdValue: xClientId,
+    xClientIdValue: xClientId, // use generated xClientId
 
-    storageKey: "auth_token",
+    storageKey: "auth_token", // where we store the API auth key
     c3: {
       status: "OnLoginStatus",
       success: "OnLoginSuccess",
@@ -95,6 +94,20 @@
 
   function clearQuery(){ try{ history.replaceState({}, "", location.pathname); }catch{} }
 
+  // ---------- helpers to handle revoked-token flow ----------
+  function resetAuth(reason) {
+    try { localStorage.removeItem(cfg.storageKey); } catch {}
+    token = "";
+    try { sessionStorage.removeItem("li_state"); } catch {}
+    console.warn("🔁 resetAuth:", reason || "");
+  }
+
+  // detect LinkedIn revoked/65601 patterns coming via backend
+  function isRevokedLinkedIn(res) {
+    const t = ((res && (res.text || "")) + " " + JSON.stringify(res?.json || {})).toUpperCase();
+    return t.includes("REVOKED_ACCESS_TOKEN") || t.includes('"SERVICEERRORCODE":65601') || t.includes("65601");
+  }
+
   // ---------- SINGLE-FLIGHT GUARDS TO PREVENT DOUBLE EXCHANGE ----------
   const CODE_LOCK_KEY = "li_code_lock";
   let exchanging = false;
@@ -145,16 +158,21 @@
   }
 
   // ------------------ 1) LOGIN (POPUP on desktop, REDIRECT on mobile) ------------------
-  window.loginWithLinkedIn = function () {
+  window.loginWithLinkedIn = function (force) {
     const state = Math.random().toString(36).slice(2);
     sessionStorage.setItem("li_state", state);
 
-    const url = "https://www.linkedin.com/oauth/v2/authorization"
+    let url = "https://www.linkedin.com/oauth/v2/authorization"
       + "?response_type=code"
       + "&client_id=" + encodeURIComponent(cfg.linkedInClientId)
       + "&redirect_uri=" + encodeURIComponent(cfg.redirectUri)
       + "&scope=" + encodeURIComponent(cfg.scope)
       + "&state=" + encodeURIComponent(state);
+
+    if (force) {
+      // force new login/consent screen so LinkedIn gives a fresh grant
+      url += "&prompt=login";
+    }
 
     if (isMobile) {
       // ✅ iOS/Android: full-page redirect (reliable)
@@ -181,7 +199,7 @@
           if (saved && backState !== saved) { pop.close(); callC3(cfg.c3.error, "state_mismatch"); return; }
 
           try { pop.document.body.innerHTML = "<p style='font:14px sans-serif;padding:16px'>Logging you in…</p>"; } catch {}
-          // ✅ use single-flight wrapper (prevents double-hit with redirect handler)
+          // ✅ single-flight wrapper prevents double-hit with redirect handler
           const ok = await safeExchangeOnce(code);
           pop.close();
           if (ok) { log("✅ Login success"); callC3(cfg.c3.success); callC3(cfg.c3.status, "logged_in"); }
@@ -198,7 +216,18 @@
       headers: { [cfg.xClientIdHeader]: cfg.xClientIdValue, "Content-Type": "application/json" },
       body: { authorization_code: code, redirect_uri: cfg.redirectUri }
     });
-    if (!r.ok) return false;
+
+    // 👇 Handle revoked token coming back from backend/LinkedIn
+    if (!r.ok) {
+      if (isRevokedLinkedIn(r)) {
+        console.warn("♻️ LinkedIn grant revoked → clearing and forcing fresh OAuth");
+        resetAuth("revoked_token");
+        // IMPORTANT: DO NOT retry same code; trigger a new auth round
+        setTimeout(() => window.loginWithLinkedIn(true), 100);
+      }
+      return false;
+    }
+
     token = r.json?.auth_key || r.json?.access_token || r.json?.token || "";
     if (!token) return false;
     try { localStorage.setItem(cfg.storageKey, token); } catch {}
@@ -304,3 +333,4 @@
   })();
 
 })();
+// V6_1:07AM
