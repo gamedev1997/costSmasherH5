@@ -209,7 +209,11 @@
     // Normal flow (not popup): exchange once here
     const ok = await safeExchangeOnce(code);
     clearQuery();
-    if (ok) { callC3(cfg.c3.success); callC3(cfg.c3.status, "logged_in"); }
+    if (ok) {
+      callC3(cfg.c3.success);
+      callC3(cfg.c3.status, "logged_in");
+      try { c3_callFunction("loggedIn"); } catch {}
+    }
     else    { callC3(cfg.c3.error, "login_failed"); }
   }
 
@@ -268,8 +272,16 @@
             // Fallback attempt (safe)
             const ok = await safeExchangeOnce(code);
             pop.close();
-            if (ok) { log("✅ Login success"); callC3(cfg.c3.success); callC3(cfg.c3.status, "logged_in"); }
-            else { log("❌ Login failed"); callC3(cfg.c3.error, "login_failed"); }
+            if (ok) {
+              log("✅ Login success");
+              callC3(cfg.c3.success);
+              callC3(cfg.c3.status, "logged_in");
+              try { c3_callFunction("loggedIn"); } catch {}
+            }
+            else {
+              log("❌ Login failed");
+              callC3(cfg.c3.error, "login_failed");
+            }
           } catch (e) {
             try { pop.close(); } catch {}
             log("❌ Login failed (popup flow)", e);
@@ -309,6 +321,9 @@
     console.log("PlayerInfo..",myPlayerId);
     try { c3_callFunction("setPlayerId",[myPlayerId]); } catch {}
 
+    // <<< notify Construct 3 that user is logged in
+    try { c3_callFunction("loggedIn"); } catch {}
+
     // cleanup PKCE verifier after successful exchange
     try { sessionStorage.removeItem("li_code_verifier"); } catch {}
 
@@ -326,6 +341,10 @@
       myPlayerId = r.json.player_id;
       console.log("PlayerInfo..",myPlayerId);
       try { c3_callFunction("setPlayerId",[myPlayerId]); } catch {}
+
+      // <<< notify Construct 3 that user is logged in (session validated)
+      try { c3_callFunction("loggedIn"); } catch {}
+
       return true; 
     }
     // token invalid → clear
@@ -409,4 +428,5 @@
   })();
 
 })();
-// new Code for popup window
+
+// new Code for popup window v2
