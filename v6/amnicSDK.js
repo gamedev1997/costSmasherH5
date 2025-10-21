@@ -24,7 +24,7 @@
   // ------------------ SETTINGS (edit if needed) ------------------
   const cfg = {
     linkedInClientId: "869u3mo71y1bpm",
-    redirectUri: "https://preview.construct.net/local.html",
+    redirectUri: "https://gamedev1997.github.io/costSmasherH5/v6/",
     scope: "openid profile email",
 
     apiBase: "https://cost-smashers.uat.amnic.com",
