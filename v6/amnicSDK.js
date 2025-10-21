@@ -24,7 +24,7 @@
   const cfg = {
     linkedInClientId: "869u3mo71y1bpm",
     // Keep exact path as registered in LinkedIn (match LinkedIn app settings)
-    redirectUri: "https://gamedev1997.github.io/costSmasherH5/v6/", 
+    redirectUri: "https://gamedev1997.github.io/costSmasherH5/v6/",
     scope: "openid profile email",
 
     apiBase: "https://cost-smashers.uat.amnic.com",
@@ -56,7 +56,7 @@
 
     const combined = a.map(data => (typeof data === "object" ? JSON.stringify(data) : String(data))).join(" ");
 
-    console.log("combine..",combined)
+    console.log("combine..", combined);
     try {
       if (combined.toLowerCase().includes("leaderboard")) {
         c3_callFunction("LBdataCreate");
@@ -206,15 +206,45 @@
       console.warn("handleRedirectIfPresent popup-opener check failed", ex);
     }
 
-    // Normal flow (not popup): exchange once here
+    // Normal flow (not popup / mobile redirect): exchange once here
     const ok = await safeExchangeOnce(code);
-    clearQuery();
+
+    // Attempt to restore mobile return state if present
+    let mobileReturn = null;
+    try {
+      const raw = sessionStorage.getItem("li_mobile_return");
+      if (raw) mobileReturn = JSON.parse(raw);
+    } catch (e) { mobileReturn = null; }
+
     if (ok) {
       callC3(cfg.c3.success);
       callC3(cfg.c3.status, "logged_in");
       try { c3_callFunction("loggedIn"); } catch {}
+
+      // If we have a saved mobile return point, restore it without reloading
+      if (mobileReturn && sessionStorage.getItem("li_mobile_inflight") === "1") {
+        try {
+          const targetPath = (mobileReturn.pathname || "/") + (mobileReturn.hash || "");
+          history.replaceState({}, "", targetPath);
+          if (typeof mobileReturn.scrollY === "number") {
+            try { window.scrollTo(0, mobileReturn.scrollY); } catch {}
+          }
+        } catch (e) {
+          console.warn("restore mobile return failed", e);
+        } finally {
+          try { sessionStorage.removeItem("li_mobile_return"); } catch {}
+          try { sessionStorage.removeItem("li_mobile_inflight"); } catch {}
+        }
+      } else {
+        try { clearQuery(); } catch {}
+      }
+      return;
+    } else {
+      callC3(cfg.c3.error, "login_failed");
+      try { sessionStorage.removeItem("li_mobile_inflight"); } catch {}
+      try { clearQuery(); } catch {}
+      return;
     }
-    else    { callC3(cfg.c3.error, "login_failed"); }
   }
 
   // ------------------ 1) LOGIN (POPUP on desktop, REDIRECT on mobile) ------------------
@@ -240,6 +270,19 @@
 
     if (isMobile) {
       // iOS/Android: full-page redirect
+      // Save a "return point" so after LinkedIn redirects back we can restore state without reloading
+      try {
+        const returnInfo = {
+          href: location.href,
+          pathname: location.pathname,
+          hash: location.hash || "",
+          scrollY: window.scrollY || 0,
+          timestamp: Date.now()
+        };
+        sessionStorage.setItem("li_mobile_return", JSON.stringify(returnInfo));
+        sessionStorage.setItem("li_mobile_inflight", "1");
+      } catch (e) { console.warn("could not save return info", e); }
+
       window.location.assign(url);
       return;
     }
@@ -318,7 +361,7 @@
     try { localStorage.setItem(cfg.storageKey, token); } catch {}
     log("🔐 token saved");
     myPlayerId = r.json.player_id;
-    console.log("PlayerInfo..",myPlayerId);
+    console.log("PlayerInfo..", myPlayerId);
     try { c3_callFunction("setPlayerId",[myPlayerId]); } catch {}
 
     // <<< notify Construct 3 that user is logged in
@@ -335,17 +378,18 @@
     token = localStorage.getItem(cfg.storageKey) || "";
     if (!token) { callC3(cfg.c3.status, "logged_out"); return false; }
     const r = await http(`${cfg.apiBase}/v1/player`, { headers: authHeaders() });
-    if (r.ok) { 
-      log("👤 session valid"); callC3(cfg.c3.status, "logged_in");
-      console.log("token...",cfg.storageKey);
+    if (r.ok) {
+      log("👤 session valid");
+      callC3(cfg.c3.status, "logged_in");
+      console.log("token...", cfg.storageKey);
       myPlayerId = r.json.player_id;
-      console.log("PlayerInfo..",myPlayerId);
+      console.log("PlayerInfo..", myPlayerId);
       try { c3_callFunction("setPlayerId",[myPlayerId]); } catch {}
 
       // <<< notify Construct 3 that user is logged in (session validated)
       try { c3_callFunction("loggedIn"); } catch {}
 
-      return true; 
+      return true;
     }
     // token invalid → clear
     try { localStorage.removeItem(cfg.storageKey); } catch {}
@@ -429,4 +473,5 @@
 
 })();
 
-// new Code for popup window v2
+
+// new Code for popup window v3
