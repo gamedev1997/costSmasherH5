@@ -53,17 +53,11 @@
 
   const log = (...a) => {
     console.log("[App]", ...a);
-
     const combined = a.map(data => (typeof data === "object" ? JSON.stringify(data) : String(data))).join(" ");
-
     console.log("combine..", combined);
     try {
-      if (combined.toLowerCase().includes("leaderboard")) {
-        c3_callFunction("LBdataCreate");
-      }
-      if (combined.toLowerCase().includes("login success") || combined.toLowerCase().includes("session valid")) {
-        c3_callFunction("loggedIn");
-      }
+      if (combined.toLowerCase().includes("leaderboard")) c3_callFunction("LBdataCreate");
+      if (combined.toLowerCase().includes("login success") || combined.toLowerCase().includes("session valid")) c3_callFunction("loggedIn");
     } catch {}
   };
 
@@ -92,7 +86,6 @@
       cache: "no-store",
       redirect: "follow",
       referrerPolicy: "no-referrer"
-      // credentials: "include" // only if backend supports credentials
     });
 
     const text = await res.text();
@@ -126,7 +119,6 @@
     return btoa(str).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'');
   }
   function genCodeVerifier() {
-    // 64 bytes -> base64url ~86 chars; we will use whole string
     const arr = new Uint8Array(64);
     crypto.getRandomValues(arr);
     return base64UrlEncode(arr).slice(0,128);
@@ -141,39 +133,25 @@
   let exchanging = false;
 
   async function safeExchangeOnce(code) {
-    if (exchanging) {
-      log("⏳ exchange skipped (in-flight)");
-      return false;
-    }
+    if (exchanging) { log("⏳ exchange skipped (in-flight)"); return false; }
     const locked = sessionStorage.getItem(CODE_LOCK_KEY);
-    if (locked && locked === code) {
-      log("🛑 exchange skipped (code already used in this session)");
-      return false;
-    }
-
+    if (locked && locked === code) { log("🛑 exchange skipped (code already used in this session)"); return false; }
     try { sessionStorage.setItem(CODE_LOCK_KEY, code); } catch {}
     exchanging = true;
-    try {
-      const ok = await exchangeCode(code);
-      return ok;
-    } finally {
-      exchanging = false;
-    }
+    try { return await exchangeCode(code); }
+    finally { exchanging = false; }
   }
 
   // ---------- message listener: accept code FROM popup ----------
   window.addEventListener("message", async (ev) => {
     try {
-      // accept only messages from same origin (change if needed)
       if (!ev.origin || ev.origin !== location.origin) return;
       const data = ev.data || {};
       if (data && data.type === "linkedin_oauth" && data.code) {
         log("📩 Received oauth code from popup via postMessage");
         await safeExchangeOnce(String(data.code));
       }
-    } catch (e) {
-      console.warn("message listener error", e);
-    }
+    } catch (e) { console.warn("message listener error", e); }
   });
 
   // ------------------ MOBILE/FULL-PAGE CALLBACK HANDLER (auto) ------------------
@@ -268,32 +246,35 @@
 
     if (force) url += "&prompt=login";
 
-    if (isMobile) {
-      // iOS/Android: full-page redirect
-      // Save a "return point" so after LinkedIn redirects back we can restore state without reloading
-      try {
-        const returnInfo = {
-          href: location.href,
-          pathname: location.pathname,
-          hash: location.hash || "",
-          scrollY: window.scrollY || 0,
-          timestamp: Date.now()
-        };
-        sessionStorage.setItem("li_mobile_return", JSON.stringify(returnInfo));
-        sessionStorage.setItem("li_mobile_inflight", "1");
-      } catch (e) { console.warn("could not save return info", e); }
+    // Save return state BEFORE any navigation so same-tab popup/redirect can be restored
+    try {
+      const returnInfo = {
+        href: location.href,
+        pathname: location.pathname,
+        hash: location.hash || "",
+        scrollY: window.scrollY || 0,
+        timestamp: Date.now()
+      };
+      sessionStorage.setItem("li_mobile_return", JSON.stringify(returnInfo));
+      sessionStorage.setItem("li_mobile_inflight", "1");
+    } catch (e) { console.warn("could not save return info", e); }
 
+    // Try popup (preferred). If popup blocked or returns null, fallback to redirect.
+    const w = 600, h = 700, left = (screen.width - w) / 2, top = (screen.height - h) / 2;
+    let pop = null;
+    try {
+      pop = window.open(url, "linkedin_popup", `width=${w},height=${h},left=${left},top=${top},resizable=yes,scrollbars=yes`);
+    } catch (e) {
+      pop = null;
+    }
+
+    if (!pop) {
+      // popup blocked / not allowed — do a same-tab redirect (mobile or blocked popup)
       window.location.assign(url);
       return;
     }
 
-    // Desktop: popup
-    const w = 600, h = 700, left = (screen.width - w) / 2, top = (screen.height - h) / 2;
-    const pop = window.open(url, "linkedin_popup",
-      `width=${w},height=${h},left=${left},top=${top},resizable=yes,scrollbars=yes`);
-    if (!pop) { callC3(cfg.c3.error, "popup_blocked"); return; }
-
-    // Poll popup until redirectUri reached (we won't exchange in popup; popup will postMessage)
+    // Desktop or mobile where popup opened: poll popup until it reaches redirectUri.
     const timer = setInterval(async () => {
       try {
         if (!pop || pop.closed) { clearInterval(timer); return; }
@@ -307,21 +288,17 @@
           if (saved && backState !== saved) { pop.close(); callC3(cfg.c3.error, "state_mismatch"); return; }
 
           try { pop.document.body.innerHTML = "<p style='font:14px sans-serif;padding:16px'>Processing…</p>"; } catch {}
-          // Instead of exchange here, rely on popup to postMessage; but if postMessage fails,
-          // we still attempt safeExchangeOnce(code) as a fallback (safeExchangeOnce prevents double-exchange).
+          // Prefer popup->postMessage path, but fallback to safeExchangeOnce after short wait
           try {
-            // give popup a short moment to postMessage
             await new Promise(res => setTimeout(res, 150));
-            // Fallback attempt (safe)
             const ok = await safeExchangeOnce(code);
-            pop.close();
+            try { pop.close(); } catch {}
             if (ok) {
               log("✅ Login success");
               callC3(cfg.c3.success);
               callC3(cfg.c3.status, "logged_in");
               try { c3_callFunction("loggedIn"); } catch {}
-            }
-            else {
+            } else {
               log("❌ Login failed");
               callC3(cfg.c3.error, "login_failed");
             }
@@ -364,7 +341,7 @@
     console.log("PlayerInfo..", myPlayerId);
     try { c3_callFunction("setPlayerId",[myPlayerId]); } catch {}
 
-    // <<< notify Construct 3 that user is logged in
+    // notify Construct 3 that user is logged in
     try { c3_callFunction("loggedIn"); } catch {}
 
     // cleanup PKCE verifier after successful exchange
@@ -385,10 +362,7 @@
       myPlayerId = r.json.player_id;
       console.log("PlayerInfo..", myPlayerId);
       try { c3_callFunction("setPlayerId",[myPlayerId]); } catch {}
-
-      // <<< notify Construct 3 that user is logged in (session validated)
       try { c3_callFunction("loggedIn"); } catch {}
-
       return true;
     }
     // token invalid → clear
@@ -443,7 +417,6 @@
         return;
       }
 
-      // Normalize payload: expect an array in res.json
       const data =
         Array.isArray(res?.json) ? res.json :
         Array.isArray(res?.json?.data) ? res.json.data :
@@ -468,10 +441,9 @@
   // ------------------ 5) AUTO: handle mobile/full-page redirect (iOS/Android) ------------------
   (async function init() {
     await handleRedirectIfPresent(); // will no-op on desktop normal loads
-    // optionally also: await checkLogin();
   })();
 
 })();
 
 
-// new Code for popup window v3
+// new Code for popup window v4
